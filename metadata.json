@@ -1,0 +1,5 @@
+{
+  "name": "FinTrack Portfolio",
+  "description": "A mobile-first stock portfolio manager for NSE stocks with multi-account support and real-time P&L tracking.",
+  "requestFramePermissions": []
+}

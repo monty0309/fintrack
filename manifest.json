@@ -1,0 +1,21 @@
+{
+  "short_name": "FinTrack",
+  "name": "FinTrack Portfolio",
+  "icons": [
+    {
+      "src": "https://picsum.photos/seed/finance/192/192",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "https://picsum.photos/seed/finance/512/512",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#F5F5F7",
+  "display": "standalone",
+  "theme_color": "#000000",
+  "description": "NSE Stock Portfolio Manager"
+}
