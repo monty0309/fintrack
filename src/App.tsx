@@ -15,6 +15,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { Account, Holding, Transaction } from './types';
 import { fetchStockPrices, StockPrice } from './services/stockService';
+import { storage } from './services/storageService';
 
 export default function App() {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -23,7 +24,13 @@ export default function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [prices, setPrices] = useState<Record<string, StockPrice>>({});
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showAccountModal, setShowAccountModal] = useState(false);
+  const [newAccountName, setNewAccountName] = useState('');
+  const [editingAccountId, setEditingAccountId] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState('');
   const [view, setView] = useState<'dashboard' | 'history'>('dashboard');
 
   // Form state
@@ -36,17 +43,26 @@ export default function App() {
   });
 
   useEffect(() => {
-    fetch('/api/accounts')
-      .then(res => res.json())
-      .then(data => {
-        setAccounts(data);
-        if (data.length > 0) setActiveAccount(data[0]);
-      });
+    const data = storage.getAccounts();
+    setAccounts(data);
+    if (data.length > 0) {
+      const savedAccountId = localStorage.getItem('activeAccountId');
+      const savedAccount = data.find((a: Account) => a.id.toString() === savedAccountId);
+      setActiveAccount(savedAccount || data[0]);
+    }
   }, []);
 
   useEffect(() => {
     if (activeAccount) {
+      localStorage.setItem('activeAccountId', activeAccount.id.toString());
       refreshData();
+      
+      // Auto refresh every 2 minutes
+      const interval = setInterval(() => {
+        refreshData();
+      }, 120000);
+      
+      return () => clearInterval(interval);
     }
   }, [activeAccount]);
 
@@ -54,13 +70,8 @@ export default function App() {
     if (!activeAccount) return;
     setIsRefreshing(true);
     try {
-      const [holdingsRes, transactionsRes] = await Promise.all([
-        fetch(`/api/holdings/${activeAccount.id}`),
-        fetch(`/api/transactions/${activeAccount.id}`)
-      ]);
-      
-      const holdingsData: Holding[] = await holdingsRes.json();
-      const transactionsData: Transaction[] = await transactionsRes.json();
+      const holdingsData = storage.getHoldings(activeAccount.id);
+      const transactionsData = storage.getTransactions(activeAccount.id);
       
       setHoldings(holdingsData);
       setTransactions(transactionsData);
@@ -68,11 +79,18 @@ export default function App() {
       // Fetch live prices
       const symbols = holdingsData.map(h => h.symbol);
       if (symbols.length > 0) {
+        setFetchError(null);
         const priceData = await fetchStockPrices(symbols);
-        setPrices(priceData);
+        if (Object.keys(priceData).length > 0) {
+          setPrices(priceData);
+          setLastUpdated(new Date());
+        } else {
+          setFetchError("Could not fetch live prices. Using purchase prices.");
+        }
       }
     } catch (error) {
       console.error("Error refreshing data:", error);
+      setFetchError("Network error. Please check your connection.");
     } finally {
       setIsRefreshing(false);
     }
@@ -83,28 +101,24 @@ export default function App() {
     if (!activeAccount) return;
 
     try {
-      const res = await fetch('/api/transactions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          accountId: activeAccount.id,
-          ...formData,
-          quantity: Number(formData.quantity),
-          price: Number(formData.price)
-        })
+      storage.addTransaction({
+        account_id: activeAccount.id,
+        symbol: formData.symbol.toUpperCase(),
+        type: formData.type,
+        quantity: Number(formData.quantity),
+        price: Number(formData.price),
+        date: formData.date
       });
 
-      if (res.ok) {
-        setShowAddModal(false);
-        setFormData({
-          symbol: '',
-          type: 'BUY',
-          quantity: '',
-          price: '',
-          date: new Date().toISOString().split('T')[0]
-        });
-        refreshData();
-      }
+      setShowAddModal(false);
+      setFormData({
+        symbol: '',
+        type: 'BUY',
+        quantity: '',
+        price: '',
+        date: new Date().toISOString().split('T')[0]
+      });
+      refreshData();
     } catch (error) {
       console.error("Error adding transaction:", error);
     }
@@ -114,15 +128,61 @@ export default function App() {
     if (!confirm('Are you sure you want to delete this transaction?')) return;
 
     try {
-      const res = await fetch(`/api/transactions/${id}`, {
-        method: 'DELETE'
-      });
-
-      if (res.ok) {
-        refreshData();
-      }
+      storage.deleteTransaction(id);
+      refreshData();
     } catch (error) {
       console.error("Error deleting transaction:", error);
+    }
+  };
+
+  const handleCreateAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newAccountName.trim()) return;
+
+    try {
+      const newAcc = storage.saveAccount(newAccountName);
+      setAccounts([...accounts, newAcc]);
+      setActiveAccount(newAcc);
+      setNewAccountName('');
+      setShowAccountModal(false);
+    } catch (error) {
+      console.error("Error creating account:", error);
+    }
+  };
+
+  const handleRenameAccount = async (id: number) => {
+    if (!renameValue.trim()) return;
+
+    try {
+      storage.renameAccount(id, renameValue);
+      const updatedAccounts = accounts.map(a => a.id === id ? { ...a, name: renameValue } : a);
+      setAccounts(updatedAccounts);
+      if (activeAccount?.id === id) {
+        setActiveAccount({ ...activeAccount, name: renameValue });
+      }
+      setEditingAccountId(null);
+      setRenameValue('');
+    } catch (error) {
+      console.error("Error renaming account:", error);
+    }
+  };
+
+  const handleDeleteAccount = async (id: number) => {
+    if (accounts.length <= 1) {
+      alert("You must have at least one account.");
+      return;
+    }
+    if (!confirm('Are you sure? This will delete the account and all its transactions.')) return;
+
+    try {
+      storage.deleteAccount(id);
+      const updatedAccounts = accounts.filter(a => a.id !== id);
+      setAccounts(updatedAccounts);
+      if (activeAccount?.id === id) {
+        setActiveAccount(updatedAccounts[0]);
+      }
+    } catch (error) {
+      console.error("Error deleting account:", error);
     }
   };
 
@@ -132,7 +192,9 @@ export default function App() {
     return acc + (h.quantity * price);
   }, 0);
   const totalUnrealizedPnL = totalCurrentValue - totalInvested;
-  const totalRealizedPnL = holdings.reduce((acc, h) => acc + h.realizedPnL, 0);
+  const totalRealizedPnL = holdings.reduce((acc, h) => acc + (h.realizedPnL || 0), 0);
+  const totalPnL = (totalUnrealizedPnL || 0) + (totalRealizedPnL || 0);
+  const isPnLPositive = totalPnL >= 0;
 
   const calculatePeriodProfit = (months: number) => {
     const now = new Date();
@@ -159,7 +221,7 @@ export default function App() {
       if (tx.type === 'BUY') {
         h.quantity += tx.quantity;
         h.totalCost += tx.quantity * tx.price;
-        h.avgPrice = h.totalCost / h.quantity;
+        h.avgPrice = h.quantity > 0 ? h.totalCost / h.quantity : 0;
       } else {
         const profit = tx.quantity * (tx.price - h.avgPrice);
         
@@ -168,8 +230,13 @@ export default function App() {
           totalProfit += profit;
         }
         
+        const costOfSold = tx.quantity * h.avgPrice;
         h.quantity -= tx.quantity;
-        h.totalCost -= tx.quantity * h.avgPrice;
+        h.totalCost -= costOfSold;
+        if (h.quantity <= 0) {
+          h.totalCost = 0;
+          h.avgPrice = 0;
+        }
       }
     });
     
@@ -214,20 +281,29 @@ export default function App() {
 
       <main className="max-w-md mx-auto px-4 py-6 space-y-6">
         {/* Account Selector */}
-        <div className="flex bg-white p-1 rounded-xl border border-black/5 shadow-sm">
-          {accounts.map(acc => (
-            <button
-              key={acc.id}
-              onClick={() => setActiveAccount(acc)}
-              className={`flex-1 py-2 text-sm font-medium rounded-lg transition-all ${
-                activeAccount?.id === acc.id 
-                  ? 'bg-black text-white shadow-md' 
-                  : 'text-black/60 hover:text-black'
-              }`}
-            >
-              {acc.name}
-            </button>
-          ))}
+        <div className="flex items-center gap-2">
+          <div className="flex-1 flex bg-white p-1 rounded-xl border border-black/5 shadow-sm overflow-x-auto no-scrollbar">
+            {accounts.map(acc => (
+              <button
+                key={acc.id}
+                onClick={() => setActiveAccount(acc)}
+                className={`flex-shrink-0 px-4 py-2 text-sm font-medium rounded-lg transition-all ${
+                  activeAccount?.id === acc.id 
+                    ? 'bg-black text-white shadow-md' 
+                    : 'text-black/60 hover:text-black'
+                }`}
+              >
+                {acc.name}
+              </button>
+            ))}
+          </div>
+          <button 
+            onClick={() => setShowAccountModal(true)}
+            className="p-2 bg-white rounded-xl border border-black/5 shadow-sm hover:bg-black/5 transition-colors"
+            title="Manage Accounts"
+          >
+            <Plus size={20} />
+          </button>
         </div>
 
         {/* Portfolio Summary */}
@@ -236,6 +312,12 @@ export default function App() {
             <p className="text-white/60 text-sm font-medium uppercase tracking-wider mb-1">Total Investment</p>
             <h2 className="text-4xl font-bold mb-6">₹{totalInvested.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</h2>
             
+            {lastUpdated && (
+              <p className="absolute top-6 right-6 text-[10px] text-white/40 font-medium">
+                v1.4 • Updated: {lastUpdated.toLocaleTimeString()}
+              </p>
+            )}
+
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-white/10 rounded-2xl p-4 backdrop-blur-md">
                 <p className="text-white/60 text-xs font-medium uppercase mb-1">Current Value</p>
@@ -243,9 +325,9 @@ export default function App() {
               </div>
               <div className="bg-white/10 rounded-2xl p-4 backdrop-blur-md">
                 <p className="text-white/60 text-xs font-medium uppercase mb-1">Total P&L</p>
-                <div className={`flex items-center gap-1 text-lg font-semibold ${totalUnrealizedPnL + totalRealizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {totalUnrealizedPnL + totalRealizedPnL >= 0 ? <ArrowUpRight size={18} /> : <ArrowDownRight size={18} />}
-                  ₹{Math.abs(totalUnrealizedPnL + totalRealizedPnL).toLocaleString('en-IN')}
+                <div className={`flex items-center gap-1 text-lg font-semibold ${isPnLPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {isPnLPositive ? <ArrowUpRight size={18} /> : <ArrowDownRight size={18} />}
+                  ₹{Math.abs(totalPnL || 0).toLocaleString('en-IN')}
                 </div>
               </div>
             </div>
@@ -298,6 +380,26 @@ export default function App() {
         </div>
 
         {/* Content */}
+        {fetchError && (
+          <motion.div 
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-4 bg-rose-50 border border-rose-100 p-3 rounded-xl flex items-center justify-between text-rose-600"
+          >
+            <div className="flex items-center gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
+              <p className="text-[11px] font-bold uppercase tracking-tight">{fetchError}</p>
+            </div>
+            <button 
+              onClick={refreshData}
+              disabled={isRefreshing}
+              className="text-[10px] font-bold bg-rose-100 px-3 py-1 rounded-full hover:bg-rose-200 transition-colors disabled:opacity-50"
+            >
+              {isRefreshing ? 'RETRYING...' : 'RETRY NOW'}
+            </button>
+          </motion.div>
+        )}
+
         <AnimatePresence mode="wait">
           {view === 'dashboard' ? (
             <motion.div 
@@ -397,10 +499,104 @@ export default function App() {
         </AnimatePresence>
       </main>
 
+      {/* Account Management Modal */}
+      <AnimatePresence>
+        {showAccountModal && (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowAccountModal(false)}
+              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              className="relative bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl"
+            >
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-bold">Manage Accounts</h3>
+                <button onClick={() => setShowAccountModal(false)} className="p-2 hover:bg-black/5 rounded-full">
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2 mb-6">
+                {accounts.map(acc => (
+                  <div key={acc.id} className="flex items-center gap-3 p-3 bg-black/5 rounded-2xl group">
+                    <div className="flex-1">
+                      {editingAccountId === acc.id ? (
+                        <div className="flex gap-2">
+                          <input 
+                            autoFocus
+                            className="flex-1 bg-white border border-black/10 rounded-lg px-2 py-1 text-sm outline-none focus:border-black"
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleRenameAccount(acc.id)}
+                          />
+                          <button 
+                            onClick={() => handleRenameAccount(acc.id)}
+                            className="bg-black text-white px-3 py-1 rounded-lg text-xs font-bold"
+                          >
+                            SAVE
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="font-semibold">{acc.name}</p>
+                      )}
+                    </div>
+                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button 
+                        onClick={() => {
+                          setEditingAccountId(acc.id);
+                          setRenameValue(acc.name);
+                        }}
+                        className="p-2 hover:bg-black/10 rounded-lg text-black/60"
+                      >
+                        <RefreshCw size={14} />
+                      </button>
+                      <button 
+                        onClick={() => handleDeleteAccount(acc.id)}
+                        className="p-2 hover:bg-rose-100 rounded-lg text-rose-500"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <form onSubmit={handleCreateAccount} className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold uppercase text-black/40 ml-1">New Account Name</label>
+                  <div className="flex gap-2">
+                    <input 
+                      required
+                      placeholder="e.g. Savings, Trading"
+                      className="flex-1 bg-black/5 border border-transparent rounded-2xl px-4 py-3 outline-none focus:border-black/10 transition-all"
+                      value={newAccountName}
+                      onChange={(e) => setNewAccountName(e.target.value)}
+                    />
+                    <button 
+                      type="submit"
+                      className="bg-black text-white px-6 rounded-2xl font-bold hover:scale-105 active:scale-95 transition-all"
+                    >
+                      ADD
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Add Transaction Modal */}
       <AnimatePresence>
         {showAddModal && (
-          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
+          <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center p-4">
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -412,7 +608,7 @@ export default function App() {
               initial={{ y: '100%' }}
               animate={{ y: 0 }}
               exit={{ y: '100%' }}
-              className="relative bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl"
+              className="relative bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-6 pb-12 sm:pb-6 shadow-2xl"
             >
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-xl font-bold">Add Transaction</h2>

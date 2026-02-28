@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 export interface StockPrice {
   symbol: string;
@@ -14,41 +14,71 @@ export async function fetchStockPrices(symbols: string[]): Promise<Record<string
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
   
   try {
-    const prompt = `Fetch the current market price of the following NSE (National Stock Exchange of India) stocks: ${symbols.join(", ")}. 
-    Return the data in a strict JSON format without any markdown formatting: 
-    {
-      "SYMBOL": { "price": number, "change": number, "changePercent": number }
-    }
-    Ensure the symbols are keys and values are numbers. Use the most recent data available.`;
+    // Using gemini-3-flash-preview as recommended for basic tasks
+    const modelName = "gemini-3-flash-preview";
+    console.log("StockService v1.3 - Fetching prices for:", symbols);
+    
+    const prompt = `Search for the current market price of these NSE (India) stocks: ${symbols.join(", ")}. 
+    Use Google Search to find the latest prices from reliable sources like Google Finance or NSE India.
+    Return the data as a JSON array of objects. 
+    Example: [{"symbol": "RELIANCE", "price": 2500.50, "change": 10.5, "changePercent": 0.42}]
+    Ensure the response contains the JSON array and nothing else. If you must include text, put the JSON inside a markdown code block.`;
 
+    console.log("StockService v1.4 - Fetching prices for:", symbols);
+    
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: modelName,
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
       },
     });
 
-    const text = response.text || "{}";
-    // Robust JSON extraction
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    const cleanJson = jsonMatch ? jsonMatch[0] : text;
-    const data = JSON.parse(cleanJson);
+    const text = response.text || "";
+    console.log("AI Response:", text);
+    
+    // Robust JSON extraction: look for [ ... ] even inside markdown blocks
+    let data = [];
+    try {
+      const jsonMatch = text.match(/\[\s*\{[\s\S]*\}\s*\]/);
+      if (jsonMatch) {
+        data = JSON.parse(jsonMatch[0]);
+      } else {
+        // Try parsing the whole text if no match
+        data = JSON.parse(text);
+      }
+    } catch (e) {
+      console.error("Failed to parse AI response as JSON:", e);
+      // Fallback: try to find any JSON-like structure
+      const fallbackMatch = text.match(/\[.*\]/s);
+      if (fallbackMatch) {
+        try {
+          data = JSON.parse(fallbackMatch[0]);
+        } catch (e2) {
+          console.error("Fallback parsing failed:", e2);
+        }
+      }
+    }
     const result: Record<string, StockPrice> = {};
     
-    Object.entries(data).forEach(([symbol, info]: [string, any]) => {
-      result[symbol.toUpperCase()] = {
-        symbol: symbol.toUpperCase(),
-        price: info.price,
-        change: info.change,
-        changePercent: info.changePercent,
-        lastUpdated: new Date().toISOString()
-      };
-    });
+    if (Array.isArray(data)) {
+      data.forEach((info: any) => {
+        if (info && info.symbol && typeof info.price === 'number') {
+          const sym = info.symbol.toUpperCase();
+          result[sym] = {
+            symbol: sym,
+            price: info.price,
+            change: info.change || 0,
+            changePercent: info.changePercent || 0,
+            lastUpdated: new Date().toISOString()
+          };
+        }
+      });
+    }
 
     return result;
   } catch (error) {
-    console.error("Error fetching stock prices:", error);
+    console.error("Error in fetchStockPrices:", error);
     return {};
   }
 }
